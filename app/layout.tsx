@@ -7,7 +7,7 @@ import { Suspense } from "react"
 import "./globals.css"
 
 export const metadata: Metadata = {
-  title: "イラスト色付け - AI水彩画スタイル",
+  title: "Suisai Filler - AI水彩画スタイル",
   description: "AIを使って線画イラストを美しい水彩画スタイルに着色するアプリ",
   generator: "v0.app",
 }

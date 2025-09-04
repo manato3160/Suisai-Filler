@@ -1,14 +1,26 @@
 import axios from 'axios';
 
-export interface DifyMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-export interface DifyResponse {
-  answer: string;
-  conversation_id: string;
-  message_id: string;
+// Difyからのレスポンスの型定義（より正確に）
+export interface DifyWorkflowResponse {
+  workflow_run_id: string;
+  task_id: string;
+  data: {
+    id: string;
+    workflow_id: string;
+    status: string;
+    outputs: {
+      // outputのキーはDifyの終了ノードで定義した変数名に依存
+      // 今回は 'text' となっているが、画像の場合はファイルIDやURLの可能性がある
+      text?: string; 
+      [key: string]: any;
+    };
+    error: string | null;
+    elapsed_time: number;
+    total_tokens: number;
+    total_steps: number;
+    created_at: number;
+    finished_at: number;
+  };
 }
 
 export class DifyAPIClient {
@@ -16,237 +28,112 @@ export class DifyAPIClient {
   private apiKey: string;
 
   constructor() {
-    // 環境変数から設定を取得
-    this.apiUrl = process.env.NEXT_PUBLIC_DIFY_API_URL || process.env.DIFY_API_URL || 'https://api.dify.ai/v1';
-    this.apiKey = process.env.NEXT_PUBLIC_DIFY_API_KEY || process.env.DIFY_API_KEY || '';
+    this.apiUrl = process.env.NEXT_PUBLIC_DIFY_API_URL || 'https://api.dify.ai/v1';
+    this.apiKey = process.env.NEXT_PUBLIC_DIFY_API_KEY || '';
     
-    console.log('Dify API Client initialized:', {
-      apiUrl: this.apiUrl,
-      hasApiKey: !!this.apiKey,
-      apiKeyLength: this.apiKey ? this.apiKey.length : 0,
-      envVars: {
-        NEXT_PUBLIC_DIFY_API_URL: process.env.NEXT_PUBLIC_DIFY_API_URL,
-        DIFY_API_URL: process.env.DIFY_API_URL,
-        NEXT_PUBLIC_DIFY_API_KEY: process.env.NEXT_PUBLIC_DIFY_API_KEY,
-        DIFY_API_KEY: process.env.DIFY_API_KEY
-      }
-    });
+    if (!this.apiKey) {
+      console.error("Dify APIキーが設定されていません。 .env.local ファイルを確認してください。");
+    }
   }
+  
+  // ワークフロー実行用のメソッドを修正
+  async executeWorkflow(
+    inputs: Record<string, any>
+  ): Promise<DifyWorkflowResponse> {
+    if (!this.apiKey) {
+      throw new Error('Dify APIキーが設定されていません。');
+    }
 
-  async chatCompletion(
-    messages: DifyMessage[],
-    conversationId?: string
-  ): Promise<DifyResponse> {
+    // プロキシルートを使用してCORS問題を回避
+    const proxyEndpoint = '/api/dify';
+
     try {
-      if (!this.apiKey) {
-        throw new Error('DIFY_API_KEYが設定されていません。環境変数を確認してください。');
-      }
-
-      console.log('Sending request to Dify API:', {
-        url: `${this.apiUrl}/chat-messages`,
-        message: messages[messages.length - 1].content,
-        conversationId
+      console.log('Sending request via proxy:', {
+        endpoint: proxyEndpoint,
+        inputs: inputs,
+        hasFile: !!inputs.images
       });
 
-      // Dify APIの正しいリクエスト形式
-      const requestBody: any = {
-        inputs: {},
-        query: messages[messages.length - 1].content,
-        response_mode: 'blocking',
-        user: 'user'
-      };
-
-      // conversation_idが存在する場合のみ追加
-      if (conversationId) {
-        requestBody.conversation_id = conversationId;
-      }
-
-      // 複数のエンドポイントを試行
-      const endpoints = [
-        '/chat-messages',
-        '/messages',
-        '/completion-messages'
-      ];
-
-      let lastError: any = null;
-
-      for (const endpoint of endpoints) {
-        try {
-          console.log(`Trying endpoint: ${this.apiUrl}${endpoint}`);
-          
-          // APIキーの形式を確認
-          const authHeader = this.apiKey.startsWith('Bearer ') 
-            ? this.apiKey 
-            : `Bearer ${this.apiKey}`;
-          
-          const response = await axios.post(
-            `${this.apiUrl}${endpoint}`,
-            requestBody,
-            {
-              headers: {
-                'Authorization': authHeader,
-                'Content-Type': 'application/json'
-              }
-            }
-          );
-
-          console.log('Dify API response:', response.data);
-          return response.data;
-        } catch (error: any) {
-          console.log(`Endpoint ${endpoint} failed:`, error.response?.status, error.response?.data);
-          lastError = error;
-          
-          // 404エラーの場合は次のエンドポイントを試行
-          if (error.response?.status === 404) {
-            continue;
-          }
-          
-          // その他のエラーは即座にスロー
-          throw error;
+      // FormDataを作成してファイルとJSONデータを送信
+      const formData = new FormData();
+      
+      // ファイル以外の入力データをJSON文字列として追加
+      const nonFileInputs: Record<string, any> = {};
+      for (const [key, value] of Object.entries(inputs)) {
+        if (key !== 'images') {
+          nonFileInputs[key] = value;
         }
       }
+      
+      formData.append('inputs', JSON.stringify(nonFileInputs));
+      
+      // ファイルが存在する場合は追加
+      if (inputs.images && inputs.images instanceof File) {
+        formData.append('images', inputs.images, inputs.images.name);
+      }
 
-      // すべてのエンドポイントが失敗した場合
-      throw lastError;
+      const response = await axios.post<DifyWorkflowResponse>(
+        proxyEndpoint,
+        formData,
+        {
+          timeout: 60000, // 60秒
+        }
+      );
+      
+      console.log('Dify workflow response:', response.data);
+      return response.data;
     } catch (error: any) {
-      console.error('Dify API Error:', {
+      console.error('Dify ワークフロー実行エラー:', {
         message: error.message,
         response: error.response?.data,
         status: error.response?.status,
+        statusText: error.response?.statusText,
         config: {
           url: error.config?.url,
-          method: error.config?.method
+          method: error.config?.method,
+          headers: error.config?.headers,
+          data: error.config?.data
+        },
+        request: {
+          headers: error.request?.headers,
+          data: error.request?.data
         }
       });
 
-      if (error.response?.status === 400) {
-        const errorDetails = error.response?.data?.message || error.response?.data?.error || 'リクエストの形式が正しくありません';
-        throw new Error(`APIリクエストエラー (400): ${errorDetails}`);
-      } else if (error.response?.status === 401) {
-        throw new Error('APIキーが無効です。DIFY_API_KEYを確認してください。');
-      } else if (error.response?.status === 404) {
-        throw new Error('APIエンドポイントが見つかりません。NEXT_PUBLIC_DIFY_API_URLを確認してください。');
-      } else if (error.response?.status >= 500) {
-        throw new Error('Difyサーバーエラーが発生しました。しばらく待ってから再試行してください。');
-      } else {
-        throw new Error(`API呼び出しエラー: ${error.message}`);
-      }
-    }
-  }
-
-  async generateImage(prompt: string): Promise<string> {
-    try {
-      if (!this.apiKey) {
-        throw new Error('DIFY_API_KEYが設定されていません。環境変数を確認してください。');
-      }
-
-      console.log('Generating image with prompt:', prompt);
-
-      const response = await axios.post(
-        `${this.apiUrl}/text-to-image`,
-        {
-          prompt: prompt,
-          size: '1024x1024',
-          quality: 'standard',
-          style: 'vivid'
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.apiKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
-
-      console.log('Image generation response:', response.data);
-      return response.data.url;
-    } catch (error: any) {
-      console.error('Dify Image Generation Error:', error);
-      throw new Error(`画像生成エラー: ${error.message}`);
-    }
-  }
-
-  // ワークフロー実行用のメソッド
-  async executeWorkflow(
-    workflowId: string,
-    inputs: Record<string, any>
-  ): Promise<any> {
-    try {
-      if (!this.apiKey) {
-        throw new Error('DIFY_API_KEYが設定されていません。環境変数を確認してください。');
-      }
-
-      console.log('Executing workflow:', { workflowId, inputs });
-
-      // Difyのワークフロー実行用の複数のエンドポイントを試行
-      const workflowEndpoints = [
-        `/workflows/${workflowId}/runs`,           // 標準的なワークフロー実行
-        `/workflows/${workflowId}/execute`,       // ワークフロー実行（代替）
-        `/workflow/${workflowId}/run`,            // 単数形ワークフロー
-        `/workflow/${workflowId}/execute`,        // 単数形ワークフロー実行
-        `/api/workflows/${workflowId}/runs`,      // APIプレフィックス付き
-        `/api/workflows/${workflowId}/execute`,   // APIプレフィックス付き実行
-        `/v1/workflows/${workflowId}/runs`,      // バージョン付き
-        `/v1/workflows/${workflowId}/execute`    // バージョン付き実行
-      ];
-
-      let lastWorkflowError: any = null;
-
-      for (const endpoint of workflowEndpoints) {
-        try {
-          console.log(`Trying workflow endpoint: ${this.apiUrl}${endpoint}`);
-          
-          // APIキーの形式を確認
-          const authHeader = this.apiKey.startsWith('Bearer ') 
-            ? this.apiKey 
-            : `Bearer ${this.apiKey}`;
-
-          const response = await axios.post(
-            `${this.apiUrl}${endpoint}`,
-            {
-              inputs: inputs
-            },
-            {
-              headers: {
-                'Authorization': authHeader,
-                'Content-Type': 'application/json'
-              }
-            }
-          );
-
-          console.log('Workflow execution response:', response.data);
-          return response.data;
-        } catch (error: any) {
-          console.log(`Workflow endpoint ${endpoint} failed:`, error.response?.status, error.response?.data);
-          lastWorkflowError = error;
-          
-          // 404エラーの場合は次のエンドポイントを試行
-          if (error.response?.status === 404) {
-            continue;
-          }
-          
-          // その他のエラーは即座にスロー
-          throw error;
-        }
-      }
-
-      // すべてのエンドポイントが失敗した場合
-      throw lastWorkflowError;
-    } catch (error: any) {
-      console.error('Workflow execution error:', error);
+      // より詳細なエラーメッセージを生成
+      let errorMessage = 'ワークフローの実行中にエラーが発生しました。';
       
       if (error.response?.status === 400) {
-        const errorDetails = error.response?.data?.message || error.response?.data?.error || 'ワークフローリクエストの形式が正しくありません';
-        throw new Error(`ワークフロー実行エラー (400): ${errorDetails}`);
+        const errorDetails = error.response?.data?.error || error.response?.data?.message || 'リクエストの形式が正しくありません';
+        errorMessage = `リクエストエラー (400): ${errorDetails}`;
       } else if (error.response?.status === 401) {
-        throw new Error('ワークフロー実行の認証に失敗しました。APIキーを確認してください。');
+        errorMessage = 'APIキーが無効です。認証に失敗しました。';
+      } else if (error.response?.status === 403) {
+        errorMessage = 'アクセスが拒否されました。権限を確認してください。';
       } else if (error.response?.status === 404) {
-        throw new Error('ワークフローが見つかりません。ワークフローIDを確認してください。');
+        errorMessage = 'ワークフローが見つかりません。ワークフローIDを確認してください。';
+      } else if (error.response?.status === 413) {
+        errorMessage = 'ファイルサイズが大きすぎます。';
+      } else if (error.response?.status === 422) {
+        const errorDetails = error.response?.data?.error || error.response?.data?.message || '入力データの検証に失敗しました';
+        errorMessage = `入力エラー (422): ${errorDetails}`;
       } else if (error.response?.status >= 500) {
-        throw new Error('ワークフロー実行中にサーバーエラーが発生しました。');
-      } else {
-        throw new Error(`ワークフロー実行エラー: ${error.message}`);
+        errorMessage = 'Difyサーバーでエラーが発生しました。しばらく待ってから再試行してください。';
+      } else if (error.code === 'ECONNABORTED') {
+        errorMessage = 'リクエストがタイムアウトしました。';
+      } else if (error.code === 'NETWORK_ERROR') {
+        errorMessage = 'ネットワークエラーが発生しました。接続を確認してください。';
+      } else if (error.message) {
+        errorMessage = `エラー: ${error.message}`;
       }
+
+      // デバッグ情報も含めたエラーオブジェクトを作成
+      const detailedError = new Error(errorMessage);
+      (detailedError as any).originalError = error;
+      (detailedError as any).responseData = error.response?.data;
+      (detailedError as any).status = error.response?.status;
+      
+      throw detailedError;
     }
   }
 }
